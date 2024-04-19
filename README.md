@@ -5,6 +5,7 @@ The RAM usage for the ODLL algorithm is evaluated as follows:
 
 Training data matrix: vector<vector<double>> xl 
 
+MAX_SIZE is the maximum observations dataset can contain i.e. 1000
 Size: MAX_SIZE x num_features
 
 Each double is 8 bytes. Let's assume num_features is 10 so size is 1000 * 10 * 8 = 80KB
