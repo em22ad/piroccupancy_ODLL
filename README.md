@@ -9,11 +9,13 @@ Size: MAX_SIZE x num_features
 Each double is 8 bytes
 Let's assume num_features is 10
 So size is 1000 * 10 * 8 = 80KB
+
 vector<int> yl - Training labels vector
 
 Size: MAX_SIZE
 Each int is 4 bytes
 So size is 1000 * 4 = 4KB
+
 vector<vector<double>> xtest - Test data matrix
 
 Let's assume size is 100 observations
