@@ -21,7 +21,7 @@ Test data matrix: vector<vector<double>> xtest
 Let's assume size is 100 observations
 Size is 100 * 10 * 8 = 8KB
 
-vector<vector<double>> clusterCenters - Cluster centers
+Cluster centers: vector<vector<double>> clusterCenters
 
 Let's assume k-means finds 10 clusters
 Size is 10 * 10 * 8 = 8KB
@@ -30,7 +30,7 @@ Other variables
 
 minDistOcc, minDistUnocc: 8 bytes each
 
-Loop counters - Negligible size
+Loop counters: Negligible size
 
 Total RAM needed:
 
