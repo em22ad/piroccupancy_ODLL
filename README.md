@@ -16,7 +16,7 @@ Size: MAX_SIZE
 Each int is 4 bytes
 So size is 1000 * 4 = 4KB
 
-vector<vector<double>> xtest - Test data matrix
+Test data matrix: vector<vector<double>> xtest
 
 Let's assume size is 100 observations
 Size is 100 * 10 * 8 = 8KB
