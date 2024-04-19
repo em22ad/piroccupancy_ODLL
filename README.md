@@ -3,14 +3,14 @@ An On-Device Lifelong Learning algorithm that provides robust stationary human o
 
 The RAM usage for the ODLL algorithm is evaluated as follows:
 
-vector<vector<double>> xl - Training data matrix
+Training data matrix: vector<vector<double>> xl 
 
 Size: MAX_SIZE x num_features
 Each double is 8 bytes
 Let's assume num_features is 10
 So size is 1000 * 10 * 8 = 80KB
 
-vector<int> yl - Training labels vector
+Training labels vector: vector<int> yl
 
 Size: MAX_SIZE
 Each int is 4 bytes
