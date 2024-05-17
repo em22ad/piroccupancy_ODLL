@@ -3,194 +3,37 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <unitstd.h>
-#include <windows.h>
+#include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <termios.h>
 
+#define PIR_SENST 0.4 //less is more sensitive digital PIR
 #define DIST "EUC"
 #define FEATS 345
 #define OBS_DUR 20
 #define OBS_DUR_SH 7
 #define TARGET_CLASS 0
 #define OBS4PROC 5
+#define FLT_MAX 3.402823466e+38F// max value
 
-int init_serial_unix();
-HANDLE init_serial_win();
-double GetPIRVpp(double *data, int size);
-void consolidate(double *xData, int xData_size, double *zData, int zData_size, int *bData, int bData_size, int *cData, int cData_size);
-void get_nrfeat_window(double *wnd_ts, int wnd_ts_size, double *wnd_adc1, int wnd_adc1_size, int *wnd_pir, int wnd_pir_size, int *wnd_drv, int wnd_drv_size, double *vmax1, double *vmin1, double *vmean1, double *vstd1, double *hpu1, double *hpd1);
-int window_finder(int drv, int drv_p, int up_flag, int down_flag, int ctr, int trig, int dur);
-void observation_processor(double ts_c, int drv_c, double adc1_c, int pir_c, double *buf_ts, int *buf_ts_size, int *buf_drv, int *buf_drv_size, double *buf_adc1, int *buf_adc1_size, int *buf_pir, int *buf_pir_size, int *up, int *down, int *ctr, int *shutter_o, int label);
-double cosine_distance(double *p1, double *p2, int size);
-double euclidean_distance(double *p1, double *p2, int size);
-int classify_knn(double **training_data, int training_data_rows, int training_data_cols, double *unknown, int k);
-
-int main() {
-    float pair_data[1];
-    int drv_c, head1 = 0, head2 = 0, head3 = 0;
-    int *drv = NULL, *pir = NULL;
-    float *adc1_r = NULL;
-	time_t *ts = NULL;
-    time_t ts_st=0, ts_end=0;
-    int obs = 0;
-    int detectR = 0; //0="Unoccupied(PIR)", 1="Occupied(PIR)"
-    time_t last_sec = 1609459200;
-
-    //drv = (int*)malloc(OBS_DUR * sizeof(int));
-    //pir = (int*)malloc(OBS_DUR * sizeof(int));
-    //adc1_r = (float*)malloc(OBS_DUR * sizeof(float));
-    //ts = (float*)malloc(OBS_DUR * sizeof(time_t));
-
-	HANDLE fd=init_serial_win();
-	int fd=init_serial_unix();
-    while (1) {
-        unsigned char byte;
-		read(fd, &byte, 1); 
-		int data = (int)byte;  // convert to integer
-        head1 = head2;
-        head2 = head3;
-        head3 = data;
-
-        if (round(ts_end - ts_st) != last_sec) {
-            printf("%ld ", round(ts_end - ts_st));
-        }
-        last_sec = round(ts_end - ts_st);
-
-        if (double(ts_end - ts_st) >= OBS_DUR) {
-            obs=obs+1;
-            int i;
-            for (i = 5; i < 100; i++) {
-                adc1_r[i - 5] = adc1_r[i];
-                drv[i - 5] = drv[i];
-                pir[i - 5] = pir[i];
-                ts[i - 5] = ts[i];
-            }
-
-            for (i = 0; i < 100; i++) {
-                adc1_r[i] /= 200.0;
-            }
-
-            // Detection algorithm
-            int act_pir = 0;
-            int tot_pir = sizeof(pir) / sizeof(pir[0]);
-            for (int i = 0; i < tot_pir; i++) {
-                act_pir += pir[i];
-            }
-
-            if (act_pir > 0.05 * tot_pir) {
-                detectR=1;
-                for (int i = 0; i < sizeof(pir) / sizeof(pir[0]); i++) {
-                    pir[i] = 1;
-                }
-            } else {
-                for (int i = 0; i < sizeof(pir) / sizeof(pir[0]); i++) {
-                    pir[i] = 0;
-                }
-            }
-
-            consolidate(ts, adc1_r, pir, drv);
-        }
-
-        if (detectR != 1) {
-            int up = 1, down = 1, ctr = 0, shutter_o = 0;
-            float buf_ts[1], buf_adc1[1], buf_pir[1], buf_drv[1];
-            for (int i = 0; i < sizeof(drv) / sizeof(drv[0]); i++) {
-                observation_processor(ts[i], drv[i], adc1_r[i], pir[i], buf_ts, buf_drv, buf_adc1, buf_pir, &up, &down, &ctr, &shutter_o, TARGET_CLASS);
-            }
-        }
-
-        if (detectR == 1) {
-            printf("IO_pinPIR,GPIO.HIGH\n");
-        } else {
-            printf("IO_pinPIR,GPIO.LOW\n");
-        }
-
-        // Reset the arrays
-        for (int i = 0; i < sizeof(drv) / sizeof(drv[0]); i++) {
-            drv[i] = 0;
-            pir[i] = 0;
-            adc1_r[i] = 0;
-            ts[i] = 0;
-        }
-
-        pair_data[0] = 0;
-        head1 = 0;
-        head2 = 0;
-        head3 = 0;
-        detectR=0;
-        ts_st = 0;
-        ts_end = 0;
-        last_sec = 1609459200;
-		
-		if (head2 == 13 && head3 == 10) {
-            // Get the current time
-			time_t dt_c;
-			time(&dt_c);
-			// Convert to local time
-			struct tm *t_c = localtime(&dt_c);
-
-			// Format the datetime as a string
-			char formatted_time[20];
-			strftime(formatted_time, sizeof(formatted_time), "%Y-%m-%d %H:%M:%S", t_c);
-			printf("Formatted local time: %s\n", formatted_time);
-
-			// Convert local time to UTC
-			struct tm *ts_gm = gmtime(&ct_c);
-			// Get the Unix timestamp from the UTC time
-			time_t ts_c = mktime(ts_gm);
-			printf("UTC timestamp: %ld\n", ts_c);
-			
-			if (ts_st == 0) {
-                ts_st = ts_c;
-            }
-            ts_end = ts_c;
-
-            ts[0] = ts_c;
-            if (pair_data[1] > 0) {
-                drv_c = 1;
-            } else {
-                drv_c = 0;
-            }
-			
-            // Append to arrays
-            ts = realloc(ts, (OBS_DUR + 1) * sizeof(float));
-            ts[OBS_DUR] = ts_c;
-
-            drv = realloc(drv, (OBS_DUR + 1) * sizeof(int));
-            drv[OBS_DUR] = drv_c;
-
-            adc1_r = realloc(adc1_r, (OBS_DUR + 1) * sizeof(float));
-            adc1_r[OBS_DUR] = (pair_data[3] * 256 + pair_data[4]);
-
-            pir = realloc(pir, (OBS_DUR + 1) * sizeof(int));
-            pir[OBS_DUR] = pair_data[6];
-        }
-    }
-    // Close serial port
-    CloseHandle(fd);
-    //close(fd);
-
-    return 0;
-}
 int init_serial_unix()
 {
-	int fd;
+    int fd;
     struct termios tty;
 
     // Open the serial port
     fd = open("/dev/ttyUSB0", O_RDWR | O_NOCTTY | O_SYNC);
     if (fd < 0) {
         //fprintf(stderr, "Error opening /dev/ttyUSB0: %s\n", strerror(errno));
-        return 1;
+        return -1;
     }
 
     // Get current serial port settings
     if (tcgetattr(fd, &tty) != 0) {
         //fprintf(stderr, "Error from tcgetattr: %s\n", strerror(errno));
         close(fd);
-        return 1;
+        return -1;
     }
 
     // Set Baud Rate
@@ -216,69 +59,15 @@ int init_serial_unix()
     if (tcsetattr(fd, TCSANOW, &tty) != 0) {
         fprintf(stderr, "Error from tcsetattr: %s\n", strerror(errno));
         close(fd);
-        return 1;
+        return -1;
     }
 
     //printf("Serial port /dev/ttyUSB0 opened and configured successfully.\n");
+    return fd;
 }
-HANDLE init_serial_win()
-{ 
-    HANDLE hSerial;
-	DCB dcbSerialParams = {0};
-    COMMTIMEOUTS timeouts = {0};
 
-    // Open the serial port
-    hSerial = CreateFile("COM1", GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
-    if (hSerial == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "Error opening serial port\n");
-        return 1;
-    }
-
-    // Set device parameters (115200 baud, 1 start bit, 1 stop bit, no parity)
-    dcbSerialParams.DCBlength = sizeof(dcbSerialParams);
-    if (!GetCommState(hSerial, &dcbSerialParams)) {
-        fprintf(stderr, "Error getting device state\n");
-        CloseHandle(hSerial);
-        return 1;
-    }
-
-    dcbSerialParams.BaudRate = CBR_115200;
-    dcbSerialParams.ByteSize = 8;
-    dcbSerialParams.StopBits = ONESTOPBIT;
-    dcbSerialParams.Parity = NOPARITY;
-
-    if (!SetCommState(hSerial, &dcbSerialParams)) {
-        fprintf(stderr, "Error setting device parameters\n");
-        CloseHandle(hSerial);
-        return 1;
-    }
-
-    // Set timeouts
-    timeouts.ReadIntervalTimeout = 50;
-    timeouts.ReadTotalTimeoutConstant = 50;
-    timeouts.ReadTotalTimeoutMultiplier = 10;
-    timeouts.WriteTotalTimeoutConstant = 50;
-    timeouts.WriteTotalTimeoutMultiplier = 10;
-
-    if (!SetCommTimeouts(hSerial, &timeouts)) {
-        fprintf(stderr, "Error setting timeouts\n");
-        CloseHandle(hSerial);
-        return 1;
-    }
-
-    // Flush the input buffer
-    if (!PurgeComm(hSerial, PURGE_RXCLEAR | PURGE_RXABORT)) {
-        fprintf(stderr, "Error flushing the serial port\n");
-        CloseHandle(hSerial);
-        return 1;
-    }
-
-    printf("Serial port COM1 opened and configured successfully.\n");
-
-    return hSerial;
-}
-double GetPIRVpp(double *data, int size) {
-    double vpp = data[160] - data[0];
+float GetPIRVpp(float *data, int size) {
+    float vpp = data[160] - data[0];
     for (int i = 161; i < size; i++) {
         if (data[i] > data[160]) {
             vpp = data[i] - data[160];
@@ -288,28 +77,73 @@ double GetPIRVpp(double *data, int size) {
     }
     return vpp;
 }
-//////////////////
-void consolidate(double *xData, int xData_size, double *zData, int zData_size, int *bData, int bData_size, int *cData, int cData_size) {
-    double *xDataloc = (double *)malloc(xData_size * sizeof(double));
-    double *zDataloc = (double *)malloc(zData_size * sizeof(double));
-    int *bDataloc = (int *)malloc(bData_size * sizeof(int));
-    int *cDataloc = (int *)malloc(cData_size * sizeof(int));
+int findNearestNeighbourIndex(float value, float *x, int len) {
+    float dist;
+    int idx;
+    int i;
+    idx = -1;
+    dist = FLT_MAX;
+    for (i = 0; i < len; i++) {
+        float newDist = value - x[i];
+        if (newDist >= 0 && newDist < dist) {
+            dist = newDist;
+            idx = i;
+        }
+    }
+    return idx;
+}
 
-    memcpy(xDataloc, xData, xData_size * sizeof(double));
-    memcpy(zDataloc, zData, zData_size * sizeof(double));
-    memcpy(bDataloc, bData, bData_size * sizeof(int));
-    memcpy(cDataloc, cData, cData_size * sizeof(int));
+void interp1(float *x, int x_tam, float *y, float *xx, int xx_tam, float *yy, int *yy_size) {
+    float dx, dy;
+    float *slope, *intercept;
+    int i, indiceEnVector;
+    slope = (float *)calloc(x_tam, sizeof(float));
+    intercept = (float *)calloc(x_tam, sizeof(float));
+    for (i = 0; i < x_tam; i++) {
+        if (i < x_tam - 1) {
+            dx = x[i + 1] - x[i];
+            dy = y[i + 1] - y[i];
+            slope[i] = dy / dx;
+            intercept[i] = y[i] - x[i] * slope[i];
+        } else {
+            slope[i] = slope[i - 1];
+            intercept[i] = intercept[i - 1];
+        }
+    }
+    for (i = 0; i < xx_tam; i++) {
+        indiceEnVector = findNearestNeighbourIndex(xx[i], x, x_tam);
+        if (indiceEnVector != -1) {
+            yy[*yy_size] = slope[indiceEnVector] * xx[i] + intercept[indiceEnVector];
+            (*yy_size)++;
+        } else {
+            yy[*yy_size] = FLT_MAX;
+            (*yy_size)++;
+        }
+    }
+    free(slope);
+    free(intercept);
+}
+void consolidate(time_t *xData, int *xData_size, float *zData, int *zData_size, float *bData, int *bData_size, float *cData, int *cData_size) {
+    time_t *xDataloc = (time_t *)malloc(*xData_size * sizeof(time_t));
+    float *zDataloc = (float *)malloc(*zData_size * sizeof(float));
+    float *bDataloc = (float *)malloc(*bData_size * sizeof(float));
+    float *cDataloc = (float *)malloc(*cData_size * sizeof(float));
 
-    int size = xData_size;
+    memcpy(xDataloc, xData, *xData_size * sizeof(time_t));
+    memcpy(zDataloc, zData, *zData_size * sizeof(float));
+    memcpy(bDataloc, bData, *bData_size * sizeof(float));
+    memcpy(cDataloc, cData, *cData_size * sizeof(float));
+
+    int size = *xData_size;
     int firstrun = 0;
     int ctr = 0;
-    double sum2, sum4, sum5;
-    double ts;
+    float sum2, sum4, sum5;
+    time_t ts;
 
-    xData_size = 0;
-    zData_size = 0;
-    bData_size = 0;
-    cData_size = 0;
+    *xData_size = 0;
+    *zData_size = 0;
+    *bData_size = 0;
+    *cData_size = 0;
 
     for (int i = 1; i < size; i++) {
         if (round(xDataloc[i]) == round(xDataloc[i - 1])) {
@@ -329,17 +163,17 @@ void consolidate(double *xData, int xData_size, double *zData, int zData_size, i
         } else {
             if (ctr > 0) {
                 firstrun = 0;
-                xData[xData_size++] = ts;
-                zData[zData_size++] = sum2 / ctr;
+                xData[*xData_size++] = ts;
+                zData[*zData_size++] = sum2 / ctr;
                 if ((sum4 / ctr) > 0) {
-                    bData[bData_size++] = 1;
+                    bData[*bData_size++] = 1.0;
                 } else {
-                    bData[bData_size++] = 0;
+                    bData[*bData_size++] = 0.0;
                 }
                 if ((sum5 / ctr) > 0) {
-                    cData[cData_size++] = 1;
+                    cData[*cData_size++] = 1.0;
                 } else {
-                    cData[cData_size++] = 0;
+                    cData[*cData_size++] = 0.0;
                 }
             }
         }
@@ -350,7 +184,69 @@ void consolidate(double *xData, int xData_size, double *zData, int zData_size, i
     free(bDataloc);
     free(cDataloc);
 }
-///////////////////
+
+void interp_linear(float *x, float *y, int x_len, float *x_new, float *y_new, int x_new_len) {
+    int i, j;
+    for (i = 0; i < x_new_len; i++) {
+        if (x_new[i] <= x[0]) {
+            y_new[i] = y[0];
+        } else if (x_new[i] >= x[x_len - 1]) {
+            y_new[i] = y[x_len - 1];
+        } else {
+            for (j = 0; j < x_len - 1; j++) {
+                if (x_new[i] >= x[j] && x_new[i] <= x[j + 1]) {
+                    y_new[i] = y[j] + (y[j + 1] - y[j]) * (x_new[i] - x[j]) / (x[j + 1] - x[j]);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+float max_arr(float *arr, int len) {
+    float max_val = arr[0];
+    for (int i = 1; i < len; i++) {
+        if (arr[i] > max_val) {
+            max_val = arr[i];
+        }
+    }
+    return max_val;
+}
+
+float min_arr(float *arr, int len) {
+    float min_val = arr[0];
+    for (int i = 1; i < len; i++) {
+        if (arr[i] < min_val) {
+            min_val = arr[i];
+        }
+    }
+    return min_val;
+}
+
+float std_dev(float *arr, int n) {
+    float sum = 0.0, mean, std_dev = 0.0;
+
+    // Calculate the mean
+    for (int i = 0; i < n; i++) {
+        sum += arr[i];
+    }
+    mean = sum / n;
+
+    // Calculate the standard deviation
+    for (int i = 0; i < n; i++) {
+        std_dev += pow(arr[i] - mean, 2);
+    }
+    std_dev = sqrt(std_dev / (n - 1));
+
+    return std_dev;
+}
+
+void normalize_arr(float *arr, int n, float min_val, float max_val, float *arr_norm) {
+    for (int i = 0; i < n; i++) {
+        arr_norm[i] = (arr[i] - min_val) / (max_val - min_val);
+    }
+}
+
 void get_nrfeat_window(int wnd_ts_len, float *wnd_ts, float *wnd_adc1, float *wnd_pir, float *wnd_drv,
                        float *vmax1, float *vmin1, float *vmean1, float *vstd1, float *hpu1, float *hpd1) {
     int x_tam = wnd_ts_len;
@@ -459,146 +355,146 @@ void get_nrfeat_window(int wnd_ts_len, float *wnd_ts, float *wnd_adc1, float *wn
     free(subwu);
     free(subwd);
 }
-
-void interp_linear(float *x, float *y, int x_len, float *x_new, float *y_new, int x_new_len) {
-    int i, j;
-    for (i = 0; i < x_new_len; i++) {
-        if (x_new[i] <= x[0]) {
-            y_new[i] = y[0];
-        } else if (x_new[i] >= x[x_len - 1]) {
-            y_new[i] = y[x_len - 1];
-        } else {
-            for (j = 0; j < x_len - 1; j++) {
-                if (x_new[i] >= x[j] && x_new[i] <= x[j + 1]) {
-                    y_new[i] = y[j] + (y[j + 1] - y[j]) * (x_new[i] - x[j]) / (x[j + 1] - x[j]);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-float max_arr(float *arr, int len) {
-    float max_val = arr[0];
-    for (int i = 1; i < len; i++) {
-        if (arr[i] > max_val) {
-            max_val = arr[i];
-        }
-    }
-    return max_val;
-}
-
-float min_arr(float *arr, int len) {
-    float min_val = arr[0];
-    for (int i = 1; i < len; i++) {
-        if (arr[i] < min_val) {
-            min_val = arr[i];
-        }
-    }
-    return min_val;
-}
-
-// Function to calculate the standard deviation of an array
-float std_dev(float *arr, int n) {
-    float sum = 0.0, mean, std_dev = 0.0;
-
-    // Calculate the mean
-    for (int i = 0; i < n; i++) {
-        sum += arr[i];
-    }
-    mean = sum / n;
-
-    // Calculate the standard deviation
-    for (int i = 0; i < n; i++) {
-        std_dev += pow(arr[i] - mean, 2);
-    }
-    std_dev = sqrt(std_dev / (n - 1));
-
-    return std_dev;
-}
-
-// Function to normalize an array
-void normalize_arr(float *arr, int n, float min_val, float max_val, float *arr_norm) {
-    for (int i = 0; i < n; i++) {
-        arr_norm[i] = (arr[i] - min_val) / (max_val - min_val);
-    }
-}
 ///////////////
-int window_finder(int drv, int drv_p, int up_flag, int down_flag, int ctr, int trig, int dur) {
+void window_finder(int drv, int drv_p, int *up_flag, int *down_flag, int *ctr, int *trig2, int *dur){
     if (drv - drv_p >= 0.5) {
-        if (up_flag == 0) {
-            up_flag = 1;
+        if (*up_flag == 0) {
+            *up_flag = 1;
         }
-        if (up_flag == 1) {
-            ctr = ctr + 1;
+        if (*up_flag == 1) {
+            *ctr++;
         }
     } else {
-        down_flag = 1;
-        if (down_flag == 1) {
-            if (ctr >= OBS_DUR_SH) {
-                trig = 1;
-                dur = OBS_DUR_SH;
-                ctr = 0;
-                up_flag = 0;
+        *down_flag = 1;
+        if (*down_flag == 1) {
+            if (*ctr >= OBS_DUR_SH) {
+                *trig2 = 1;
+                *dur = OBS_DUR_SH;
+                *ctr = 0;
+                *up_flag = 0;
             }
         }
     }
-    return trig, dur, up_flag, down_flag, ctr;
 }
-///////////////
-void observation_processor(float ts_c, int drv_c, float adc1_c, int pir_c, float *buf_ts, int *buf_drv, float *buf_adc1, int *buf_pir, int up, int down, int ctr, int shutter_o, int label) {
-    int trig = 0;
+void observation_processor_rt(float ts_c, int drv_c, float adc1_c, int pir_c, float *buf_ts, int *buf_ts_size, int *buf_drv, int *buf_drv_size, float *buf_adc1, int *buf_adc1_size, int *buf_pir, int *buf_pir_size, int *up, int *down, int *ctr, int *shutter_o, float *obs_rt, int *obs_pr){
+    *obs_pr = 0;
+	int trig2 = 0;
     int dur = -1;
-
-    if (buf_ts != NULL && buf_ts->size > 0) {
-        window_finder(drv_c, buf_drv[buf_drv->size - 1], &up, &down, &ctr, &trig, &dur);
+		
+    if (*buf_ts_size > 0) {
+        window_finder(drv_c, buf_drv[*buf_drv_size - 1], up, down, ctr, &trig2, &dur);
     }
 
     if (drv_c > 0) {
-        shutter_o = 1;
+        *shutter_o = 1;
     }
 
-    if (shutter_o == 1) {
-        buf_ts->push_back(ts_c);
-        buf_adc1->push_back(adc1_c);
-        buf_pir->push_back(pir_c);
-        buf_drv->push_back(drv_c);
+    if (*shutter_o == 1) {
+        buf_ts[*buf_ts_size] = ts_c;
+        (*buf_ts_size)++;
+
+        buf_adc1[*buf_adc1_size] = adc1_c;
+        (*buf_adc1_size)++;
+
+        buf_pir[*buf_pir_size] = pir_c;
+        (*buf_pir_size)++;
+
+        buf_drv[*buf_drv_size] = drv_c;
+        (*buf_drv_size)++;
     }
 
-    if (trig == 1) {
-        trig = 0;
-        shutter_o = 0;
-
+    if (trig2 == 1) {
+        trig2 = 0;
+        *shutter_o = 0;
         int ST = 0;
-        std::vector<float> wnd_ts(buf_ts->begin() + ST, buf_ts->end());
-        std::vector<float> wnd_adc1(buf_adc1->begin() + ST, buf_adc1->end());
-        std::vector<int> wnd_pir(buf_pir->begin() + ST, buf_pir->end());
-        std::vector<int> wnd_drv(buf_drv->begin() + ST, buf_drv->end());
+        float wnd_ts[OBS_DUR];
+        float wnd_adc1[OBS_DUR];
+        float wnd_pir[OBS_DUR];
+        float wnd_drv[OBS_DUR];
 
-        float vmax1, vmin1, vmean1, vstd1, hpu1, hpd1;
-        get_nrfeat_window(wnd_ts, wnd_adc1, wnd_pir, wnd_drv, &vmax1, &vmin1, &vmean1, &vstd1, &hpu1, &hpd1);
-
-        if (label == 1) {
-            std::ofstream file("./occfeat_output.txt", std::ios::app);
-            file << wnd_ts[wnd_ts.size() - 1] << "," << vmax1 << "," << vmin1 << "," << vmean1 << "," << vstd1 << "," << hpu1 << "," << hpd1 << std::endl;
-            file.close();
-        } else {
-            std::ofstream file("./uoccfeat_output.txt", std::ios::app);
-            file << wnd_ts[wnd_ts.size() - 1] << "," << vmax1 << "," << vmin1 << "," << vmean1 << "," << vstd1 << "," << hpu1 << "," << hpd1 << std::endl;
-            file.close();
+        for (int i = ST; i < *buf_ts_size; i++) {
+            wnd_ts[i - ST] = buf_ts[i];
+        }
+        for (int i = ST; i < *buf_adc1_size; i++) {
+            wnd_adc1[i - ST] = buf_adc1[i];
+        }
+        for (int i = ST; i < *buf_pir_size; i++) {
+            wnd_pir[i - ST] = buf_pir[i];
+        }
+        for (int i = ST; i < *buf_drv_size; i++) {
+            wnd_drv[i - ST] = buf_drv[i];
         }
 
-        buf_ts->clear();
-        buf_adc1->clear();
-        buf_pir->clear();
-        buf_drv->clear();
+        float vmax1, vmin1, vmean1, vstd1, hpu1, hpd1;
+        get_nrfeat_window(*buf_ts_size - ST, wnd_ts, wnd_adc1, wnd_pir, wnd_drv, &vmax1, &vmin1, &vmean1, &vstd1, &hpu1, &hpd1);
+
+        *buf_ts_size = 0;
+        *buf_adc1_size = 0;
+        *buf_pir_size = 0;
+        *buf_drv_size = 0;
+		
+		if (FEATS == 12456) {
+            obs_rt[0] = vmax1;
+            obs_rt[1] = vmin1;
+            obs_rt[2] = vstd1;
+            obs_rt[3] = hpu1;
+            obs_rt[4] = hpd1;
+			*obs_pr = 5;
+        } else if (FEATS == 2456) {
+            obs_rt[0] = vmin1;
+            obs_rt[1] = vstd1;
+            obs_rt[2] = hpu1;
+            obs_rt[3] = hpd1;
+			*obs_pr = 4;
+        } else if (FEATS == 1245) {
+            obs_rt[0] = vmax1;
+            obs_rt[1] = vmin1;
+            obs_rt[2] = vstd1;
+            obs_rt[3] = hpu1;
+			*obs_pr = 4;
+        } else if (FEATS == 124) {
+            obs_rt[0] = vmax1;
+            obs_rt[1] = vmin1;
+            obs_rt[2] = vstd1;
+			*obs_pr = 3;
+        } else if (FEATS == 145) {
+            obs_rt[0] = vmax1;
+            obs_rt[1] = vstd1;
+            obs_rt[2] = hpu1;
+			*obs_pr = 3;
+        } else if (FEATS == 146) {
+            obs_rt[0] = vmax1;
+            obs_rt[1] = vstd1;
+            obs_rt[2] = hpd1;
+			*obs_pr = 3;
+        } else if (FEATS == 235) {
+            obs_rt[0] = vmin1;
+            obs_rt[1] = vmean1;
+            obs_rt[2] = hpu1;
+			*obs_pr = 3;
+        } else if (FEATS == 245) {
+            obs_rt[0] = vmin1;
+            obs_rt[1] = vstd1;
+            obs_rt[2] = hpu1;
+			*obs_pr = 3;
+        } else if (FEATS == 345) {
+            obs_rt[0] = vmean1;
+            obs_rt[1] = vstd1;
+            obs_rt[2] = hpu1;
+			*obs_pr = 3;
+        } else if (FEATS == 346) {
+            obs_rt[0] = vmean1;
+            obs_rt[1] = vstd1;
+            obs_rt[2] = hpd1;
+			*obs_pr = 3;
+        }
     }
 }
-/////////////////
-double cosine_distance(double *p1, double *p2, int n) {
-    double dot_product = 0.0;
-    double norm_p1 = 0.0;
-    double norm_p2 = 0.0;
+
+float cosine_distance(float *p1, float *p2, int n) {
+    float dot_product = 0.0;
+    float norm_p1 = 0.0;
+    float norm_p2 = 0.0;
 
     for (int i = 0; i < n; i++) {
         dot_product += p1[i] * p2[i];
@@ -615,9 +511,9 @@ double cosine_distance(double *p1, double *p2, int n) {
 
     return 1.0 - (dot_product / (norm_p1 * norm_p2));
 }
-////////////////
-double euclidean_distance(double *p1, double *p2, int n) {
-    double sum_squares = 0.0;
+
+float euclidean_distance(float *p1, float *p2, int n) {
+    float sum_squares = 0.0;
 
     for (int i = 0; i < n; i++) {
         sum_squares += (p1[i] - p2[i]) * (p1[i] - p2[i]);
@@ -625,9 +521,9 @@ double euclidean_distance(double *p1, double *p2, int n) {
 
     return sqrt(sum_squares);
 }
-////////////////
-int classify_knn(double **training_data, double *unknown, int k, int num_features, int num_training_samples, char **labels, char *dist_type) {
-    double *distances = (double *)malloc(num_training_samples * sizeof(double));
+
+int classify_knn(float **training_data, float *unknown, int k, int num_features, int num_training_samples, char **labels, char *dist_type) {
+    float *distances = (float *)malloc(num_training_samples * sizeof(float));
     int *indices = (int *)malloc(k * sizeof(int));
     int *votes = (int *)calloc(2, sizeof(int)); // Assuming binary classification (0 or 1)
 
@@ -642,21 +538,22 @@ int classify_knn(double **training_data, double *unknown, int k, int num_feature
 
     // Sort the distances and get the indices of the k nearest neighbors
     for (int i = 0; i < k; i++) {
-        int min_idx = 0;
-        double min_dist = distances[0];
-        for (int j = 1; j < num_training_samples - i; j++) {
+        int min_idx = i;
+        float min_dist = distances[i];
+        for (int j = i + 1; j < num_training_samples; j++) {
             if (distances[j] < min_dist) {
                 min_idx = j;
                 min_dist = distances[j];
             }
         }
         indices[i] = min_idx;
-        distances[min_idx] = INFINITY; // Mark the current minimum as visited
+        distances[min_idx] = distances[i];
+        distances[i] = min_dist;
     }
 
     // Count the votes for the k nearest neighbors
     for (int i = 0; i < k; i++) {
-        votes[(int)atoi(labels[indices[i]])]++;
+        votes[atoi(labels[indices[i]])]++;
     }
 
     // Determine the most common label
@@ -673,4 +570,162 @@ int classify_knn(double **training_data, double *unknown, int k, int num_feature
     free(indices);
     free(votes);
     return predicted_label;
+}
+int main() {
+    float pair_data[OBS_DUR] = {0};
+    int drv_c, head1 = 0, head2 = 0, head3 = 0;
+    float drv[OBS_DUR] = {0}, pir[OBS_DUR] = {0};
+    float adc1_r[OBS_DUR] = {0};
+    time_t ts[OBS_DUR] = {0};
+    int pair_size=0, drv_size = 0, pir_size = 0, adc1_r_size = 0, ts_size = 0;
+    time_t ts_st = 0, ts_end = 0;
+    int obs = 0;
+    int detectR = 0; //0="Unoccupied(PIR)", 1="Occupied(PIR)"
+    time_t last_sec = 1609459200;
+
+    //HANDLE fd = init_serial_win();
+    int fd = init_serial_unix();
+    while (obs < 1) {
+        unsigned char byte;
+        //ReadFile(fd, &byte, 1, NULL, NULL);
+        read(fd, &byte, 1);
+        int data = (int)byte;  // convert to integer
+        head1 = head2;
+        head2 = head3;
+        head3 = data;
+        
+		if (round(ts_end - ts_st) != last_sec) {
+            printf("%ld ", round(ts_end - ts_st));
+        }
+        last_sec = round(ts_end - ts_st);
+		
+		int slpr_op=0;
+        if ((ts_end - ts_st) >= OBS_DUR) {
+            obs++;
+            for (int i = 5; i < ts_size; i++) {
+                adc1_r[i - 5] = adc1_r[i];
+                drv[i - 5] = drv[i];
+                pir[i - 5] = pir[i];
+                ts[i - 5] = ts[i];
+            }
+
+            for (int i = 0; i < adc1_r_size; i++) {
+                adc1_r[i]=adc1_r[i]/50.0;
+            }
+
+            // Detection algorithm
+            int act_pir = 0;
+            for (int i = 0; i < pir_size; i++) {
+                act_pir = act_pir+pir[i];
+            }
+
+            if (act_pir > PIR_SENST * pir_size) {
+                detectR = 1;
+                for (int i = 0; i < pir_size; i++) {
+                    pir[i] = 1;
+                }
+            } else {
+                for (int i = 0; i < pir_size; i++) {
+                    pir[i] = 0;
+                }
+            }
+
+            consolidate(ts, &ts_size, adc1_r, &adc1_r_size, pir, &pir_size, drv, &drv_size);
+			
+			if (detectR != 1) {
+				int up = 1, down = 1, ctr = 0, shutter_o = 0;
+				float buf_ts[OBS_DUR] = {0};
+				float buf_adc1[OBS_DUR] = {0};
+				int buf_pir[OBS_DUR] = {0};
+				int buf_drv[OBS_DUR] = {0};
+				int buf_ts_size = 0, buf_adc1_size = 0, buf_pir_size = 0, buf_drv_size = 0;
+				int obs_pr=0;
+				for (int i = 0; i < drv_size; i++) {
+					float obs_rt[5] = {0};
+					observation_processor_rt(ts[i], drv[i], adc1_r[i], pir[i], buf_ts, &buf_ts_size, buf_drv, &buf_drv_size, buf_adc1, &buf_adc1_size, buf_pir, &buf_pir_size, &up, &down, &ctr, &shutter_o, obs_rt, &obs_pr);
+					
+					if (obs_pr > 0)
+					{
+						//slpr_op=learn_infer(obs_rt,obs_pr);
+						slpr_op=1;
+						break; //TBD
+					}
+					
+				}
+			}
+
+
+        }
+		
+        if (detectR == 1) {
+            printf("IO_pinPIR,GPIO.HIGH\n");
+        } else {
+            printf("IO_pinPIR,GPIO.LOW\n");
+        }
+		
+		if (slpr_op == 1) {
+            printf("IO_pinPIR,GPIO.HIGH\n");
+        } else {
+            printf("IO_pinPIR,GPIO.LOW\n");
+        }
+		
+		// Reset variables
+        drv_size = 0;
+        pir_size = 0;
+        adc1_r_size = 0;
+        ts_size = 0;
+        ts_st = 0;
+        ts_end = 0;
+		head1 = 0;
+        head2 = 0;
+        head3 = 0;
+		slpr_op = 0;
+		detectR = 0;
+		////////////////////////////////////////////////
+        if (head2 == 13 && head3 == 10) { //carriage return followed by line feed
+            // Get the current time
+            time_t dt_c;
+            time(&dt_c);
+            // Convert to local time
+            struct tm *t_c = localtime(&dt_c);
+
+            // Format the datetime as a string
+            char formatted_time[20];
+            strftime(formatted_time, sizeof(formatted_time), "%Y-%m-%d %H:%M:%S", t_c);
+            printf("Formatted local time: %s\n", formatted_time);
+
+            // Convert local time to UTC
+            struct tm *ts_gm = gmtime(&dt_c);
+            // Get the Unix timestamp from the UTC time
+            time_t ts_c = mktime(ts_gm);
+            printf("UTC timestamp: %ld\n", ts_c);
+
+            if (ts_st == 0) {
+                ts_st = ts_c;
+            }
+            ts_end = ts_c;
+
+            ts[ts_size++] = ts_c;
+            if (pair_data[1] > 0) {
+                drv_c = 1;
+            } else {
+                drv_c = 0;
+            }
+
+            drv[drv_size++] = drv_c;
+            adc1_r[adc1_r_size++] = (pair_data[3] * 256 + pair_data[4]);
+            pir[pir_size++] = pair_data[6];
+
+            pair_data[0] = 0;
+			pair_size = 0;
+        }
+
+        pair_data[pair_size++]=data;
+    }
+
+    // Close serial port
+    //CloseHandle(fd);
+    close(fd);
+
+    return 0;
 }
