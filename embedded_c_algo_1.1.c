@@ -1,731 +1,1012 @@
+// read_preprocess.cpp : This file contains the 'main' function. Program execution begins and ends there.
+//
+
+#include "pch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <termios.h>
 
 #define PIR_SENST 0.4 //less is more sensitive digital PIR
 #define DIST "EUC"
-#define FEATS 345
 #define OBS_DUR 20
-#define OBS_DUR_SH 7
-#define TARGET_CLASS 0
-#define OBS4PROC 5
+#define OBS_DUR_SH 9 //4
+#define TARGET_CLASS 0 //0,1,-1(RT MODE)
+#define IGNORE1ST 1
 #define FLT_MAX 3.402823466e+38F// max value
+#define MAX_DATASET_SIZE 200
+#define MAX_FEATURES 6
+#define SAVE_FILE "2024-05-19-21-20" //#define SAVE_FILE "2024-05-19-21-20_uocc.txt"
 
-int init_serial_unix()
-{
-    int fd;
-    struct termios tty;
-
-    // Open the serial port
-    fd = open("/dev/ttyUSB0", O_RDWR | O_NOCTTY | O_SYNC);
-    if (fd < 0) {
-        //fprintf(stderr, "Error opening /dev/ttyUSB0: %s\n", strerror(errno));
-        return -1;
-    }
-
-    // Get current serial port settings
-    if (tcgetattr(fd, &tty) != 0) {
-        //fprintf(stderr, "Error from tcgetattr: %s\n", strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    // Set Baud Rate
-    cfsetospeed(&tty, B115200);
-    cfsetispeed(&tty, B115200);
-
-    // Setting other Port Stuff
-    tty.c_cflag &= ~PARENB;         // Make 8n1
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-
-    tty.c_cflag &= ~CRTSCTS;        // no flow control
-    tty.c_cc[VMIN]  = 1;            // read doesn't block
-    tty.c_cc[VTIME] = 5;            // 0.5 seconds read timeout
-    tty.c_cflag |= CREAD | CLOCAL;  // turn on READ & ignore ctrl lines
-
-    // Make raw
-    cfmakeraw(&tty);
-
-    // Flush Port, then applies attributes
-    tcflush(fd, TCIFLUSH);
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        fprintf(stderr, "Error from tcsetattr: %s\n", strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    //printf("Serial port /dev/ttyUSB0 opened and configured successfully.\n");
-    return fd;
-}
+typedef struct {
+	float obs[MAX_FEATURES];
+	int label;
+} DataPoint;
+DataPoint dataset[MAX_DATASET_SIZE];
+int dataset_size = 0;
+int feats[MAX_FEATURES] = { 0,0,1,1,1,0 };
 
 float GetPIRVpp(float *data, int size) {
-    float vpp = data[160] - data[0];
-    for (int i = 161; i < size; i++) {
-        if (data[i] > data[160]) {
-            vpp = data[i] - data[160];
-        } else if (data[i] < data[0]) {
-            vpp = data[160] - data[i];
-        }
-    }
-    return vpp;
+	float vpp = data[160] - data[0];
+	for (int i = 161; i < size; i++) {
+		if (data[i] > data[160]) {
+			vpp = data[i] - data[160];
+		}
+		else if (data[i] < data[0]) {
+			vpp = data[160] - data[i];
+		}
+	}
+	return vpp;
 }
+
 int findNearestNeighbourIndex(float value, float *x, int len) {
-    float dist;
-    int idx;
-    int i;
-    idx = -1;
-    dist = FLT_MAX;
-    for (i = 0; i < len; i++) {
-        float newDist = value - x[i];
-        if (newDist >= 0 && newDist < dist) {
-            dist = newDist;
-            idx = i;
-        }
-    }
-    return idx;
+	float dist;
+	int idx;
+	int i;
+	idx = -1;
+	dist = FLT_MAX;
+	for (i = 0; i < len; i++) {
+		float newDist = value - x[i];
+		if (newDist >= 0 && newDist < dist) {
+			dist = newDist;
+			idx = i;
+		}
+	}
+	return idx;
 }
 
 void interp1(float *x, int x_tam, float *y, float *xx, int xx_tam, float *yy, int *yy_size) {
-    float dx, dy;
-    float *slope, *intercept;
-    int i, indiceEnVector;
-    slope = (float *)calloc(x_tam, sizeof(float));
-    intercept = (float *)calloc(x_tam, sizeof(float));
-    for (i = 0; i < x_tam; i++) {
-        if (i < x_tam - 1) {
-            dx = x[i + 1] - x[i];
-            dy = y[i + 1] - y[i];
-            slope[i] = dy / dx;
-            intercept[i] = y[i] - x[i] * slope[i];
-        } else {
-            slope[i] = slope[i - 1];
-            intercept[i] = intercept[i - 1];
-        }
-    }
-    for (i = 0; i < xx_tam; i++) {
-        indiceEnVector = findNearestNeighbourIndex(xx[i], x, x_tam);
-        if (indiceEnVector != -1) {
-            yy[*yy_size] = slope[indiceEnVector] * xx[i] + intercept[indiceEnVector];
-            (*yy_size)++;
-        } else {
-            yy[*yy_size] = FLT_MAX;
-            (*yy_size)++;
-        }
-    }
-    free(slope);
-    free(intercept);
+	float dx, dy;
+	float slope, intercept;
+	int i;
+	for (i = 0; i < x_tam; i++) {
+		if (i < x_tam - 1) {
+			dx = x[i + 1] - x[i];
+			dy = y[i + 1] - y[i];
+			slope = dy / dx;
+			intercept = y[i] - x[i] * slope;
+		}
+		for (int j = 0; j < xx_tam; j++) {
+			if (xx[j] >= x[i] && (i == x_tam - 1 || xx[j] < x[i + 1])) {
+				yy[*yy_size] = slope * xx[j] + intercept;
+				(*yy_size)++;
+			}
+		}
+	}
 }
+
 void consolidate(time_t *xData, int *xData_size, float *zData, int *zData_size, float *bData, int *bData_size, float *cData, int *cData_size) {
-    time_t *xDataloc = (time_t *)malloc(*xData_size * sizeof(time_t));
-    float *zDataloc = (float *)malloc(*zData_size * sizeof(float));
-    float *bDataloc = (float *)malloc(*bData_size * sizeof(float));
-    float *cDataloc = (float *)malloc(*cData_size * sizeof(float));
+	int size = *xData_size;
+	int ctr = 1;
+	float sum2 = zData[0], sum4 = bData[0], sum5 = cData[0];
+	time_t ts = xData[0];
 
-    memcpy(xDataloc, xData, *xData_size * sizeof(time_t));
-    memcpy(zDataloc, zData, *zData_size * sizeof(float));
-    memcpy(bDataloc, bData, *bData_size * sizeof(float));
-    memcpy(cDataloc, cData, *cData_size * sizeof(float));
+	*xData_size = 0;
+	*zData_size = 0;
+	*bData_size = 0;
+	*cData_size = 0;
 
-    int size = *xData_size;
-    int firstrun = 0;
-    int ctr = 0;
-    float sum2, sum4, sum5;
-    time_t ts;
+	for (int i = 1; i < size; i++) {
+		if (xData[i] == ts) {
+			sum2 += zData[i];
+			sum4 += bData[i];
+			sum5 += cData[i];
+			ctr++;
+		}
+		else {
+			xData[*xData_size] = ts;
+			(*xData_size)++;
+			zData[*zData_size] = sum2 / ctr;
+			(*zData_size)++;
+			bData[*bData_size] = ((sum4 / ctr) > 0) ? 1.0 : 0.0;
+			(*bData_size)++;
+			cData[*cData_size] = ((sum5 / ctr) > 0) ? 1.0 : 0.0;
+			(*cData_size)++;
 
-    *xData_size = 0;
-    *zData_size = 0;
-    *bData_size = 0;
-    *cData_size = 0;
+			ts = xData[i];
+			sum2 = zData[i];
+			sum4 = bData[i];
+			sum5 = cData[i];
+			ctr = 1;
+		}
+	}
 
-    for (int i = 1; i < size; i++) {
-        if (round(xDataloc[i]) == round(xDataloc[i - 1])) {
-            if (firstrun == 0) {
-                firstrun = 1;
-                sum2 = zDataloc[i - 1] + zDataloc[i];
-                sum4 = bDataloc[i - 1] + bDataloc[i];
-                sum5 = cDataloc[i - 1] + cDataloc[i];
-                ts = round(xDataloc[i - 1]);
-                ctr = 2;
-            } else {
-                sum2 += zDataloc[i];
-                sum4 += bDataloc[i];
-                sum5 += cDataloc[i];
-                ctr++;
-            }
-        } else {
-            if (ctr > 0) {
-                firstrun = 0;
-                xData[*xData_size++] = ts;
-                zData[*zData_size++] = sum2 / ctr;
-                if ((sum4 / ctr) > 0) {
-                    bData[*bData_size++] = 1.0;
-                } else {
-                    bData[*bData_size++] = 0.0;
-                }
-                if ((sum5 / ctr) > 0) {
-                    cData[*cData_size++] = 1.0;
-                } else {
-                    cData[*cData_size++] = 0.0;
-                }
-            }
-        }
-    }
-
-    free(xDataloc);
-    free(zDataloc);
-    free(bDataloc);
-    free(cDataloc);
+	// Process the last timestamp
+	xData[*xData_size] = ts;
+	(*xData_size)++;
+	zData[*zData_size] = sum2 / ctr;
+	(*zData_size)++;
+	bData[*bData_size] = (sum4 / ctr) > 0 ? 1.0 : 0.0;
+	(*bData_size)++;
+	cData[*cData_size] = (sum5 / ctr) > 0 ? 1.0 : 0.0;
+	(*cData_size)++;
 }
 
-void interp_linear(float *x, float *y, int x_len, float *x_new, float *y_new, int x_new_len) {
-    int i, j;
-    for (i = 0; i < x_new_len; i++) {
-        if (x_new[i] <= x[0]) {
-            y_new[i] = y[0];
-        } else if (x_new[i] >= x[x_len - 1]) {
-            y_new[i] = y[x_len - 1];
-        } else {
-            for (j = 0; j < x_len - 1; j++) {
-                if (x_new[i] >= x[j] && x_new[i] <= x[j + 1]) {
-                    y_new[i] = y[j] + (y[j + 1] - y[j]) * (x_new[i] - x[j]) / (x[j + 1] - x[j]);
-                    break;
-                }
-            }
-        }
-    }
+void interp_linear(time_t *x, float *y, int x_len, time_t *x_new, float *y_new, int x_new_len) {
+	int i, j;
+	for (i = 0; i < x_new_len; i++) {
+		if (x_new[i] <= x[0]) {
+			y_new[i] = y[0];
+		}
+		else if (x_new[i] >= x[x_len - 1]) {
+			y_new[i] = y[x_len - 1];
+		}
+		else {
+			for (j = 0; j < x_len - 1; j++) {
+				if (x_new[i] >= x[j] && x_new[i] <= x[j + 1]) {
+					y_new[i] = y[j] + (y[j + 1] - y[j]) * (x_new[i] - x[j]) / (x[j + 1] - x[j]);
+					break;
+				}
+			}
+		}
+	}
 }
 
 float max_arr(float *arr, int len) {
-    float max_val = arr[0];
-    for (int i = 1; i < len; i++) {
-        if (arr[i] > max_val) {
-            max_val = arr[i];
-        }
-    }
-    return max_val;
+	float max_val = arr[0];
+	for (int i = 1; i < len; i++) {
+		if (arr[i] > max_val) {
+			max_val = arr[i];
+		}
+	}
+	return max_val;
 }
 
 float min_arr(float *arr, int len) {
-    float min_val = arr[0];
-    for (int i = 1; i < len; i++) {
-        if (arr[i] < min_val) {
-            min_val = arr[i];
-        }
-    }
-    return min_val;
+	float min_val = arr[0];
+	for (int i = 1; i < len; i++) {
+		if (arr[i] < min_val) {
+			min_val = arr[i];
+		}
+	}
+	return min_val;
+}
+
+float mean_arr(float *arr, int len) {
+	float sum = 0.0;
+	for (int i = 0; i < len; i++) {
+		sum += arr[i];
+	}
+	return sum / len;
 }
 
 float std_dev(float *arr, int n) {
-    float sum = 0.0, mean, std_dev = 0.0;
+	float sum = 0.0, mean, std_dev = 0.0;
 
-    // Calculate the mean
-    for (int i = 0; i < n; i++) {
-        sum += arr[i];
-    }
-    mean = sum / n;
+	// Calculate the mean
+	for (int i = 0; i < n; i++) {
+		sum += arr[i];
+	}
+	mean = sum / n;
 
-    // Calculate the standard deviation
-    for (int i = 0; i < n; i++) {
-        std_dev += pow(arr[i] - mean, 2);
-    }
-    std_dev = sqrt(std_dev / (n - 1));
+	// Calculate the standard deviation
+	for (int i = 0; i < n; i++) {
+		std_dev += pow(arr[i] - mean, 2);
+	}
+	std_dev = sqrt(std_dev / (n - 1));
 
-    return std_dev;
+	return std_dev;
 }
 
 void normalize_arr(float *arr, int n, float min_val, float max_val, float *arr_norm) {
-    for (int i = 0; i < n; i++) {
-        arr_norm[i] = (arr[i] - min_val) / (max_val - min_val);
-    }
+	float range = max_val - min_val;
+	for (int i = 0; i < n; i++) {
+		arr_norm[i] = (arr[i] - min_val) / range;
+	}
 }
 
-void get_nrfeat_window(int wnd_ts_len, float *wnd_ts, float *wnd_adc1, float *wnd_pir, float *wnd_drv,
-                       float *vmax1, float *vmin1, float *vmean1, float *vstd1, float *hpu1, float *hpd1) {
-    int x_tam = wnd_ts_len;
-    int xx_tam = wnd_ts_len;
-    float *xts = (float *)malloc(xx_tam * sizeof(float));
-    float *yadc1 = (float *)malloc(xx_tam * sizeof(float));
-    float *ypir = (float *)malloc(xx_tam * sizeof(float));
-    float *ydrv = (float *)malloc(xx_tam * sizeof(float));
+void get_nrfeat_window(int wnd_ts_len, time_t *wnd_ts, float *wnd_adc1, float *wnd_pir, float *wnd_drv,
+	float *vmax1, float *vmin1, float *vmean1, float *vstd1, float *hpu1, float *hpd1) {
+	int x_tam = wnd_ts_len;
+	int xx_tam = wnd_ts[wnd_ts_len - 1] - wnd_ts[0] + 1;
 
-    // Set up data points for interpolation
-    for (int i = 0; i < x_tam; i++) {
-        xts[i] = wnd_ts[i];
-    }
+	time_t xts[OBS_DUR];
+	float yadc1[OBS_DUR];
+	float ypir[OBS_DUR];
+	float ydrv[OBS_DUR];
 
-    // Interpolate
-    for (int i = x_tam; i < xx_tam; i++) {
-        xts[i] = xts[i - 1] + 1;
-    }
+	// Set up data points for interpolation
+	for (int i = 0; i < xx_tam; i++) {
+		xts[i] = wnd_ts[0] + i;
+	}
 
-    interp_linear(wnd_ts, wnd_adc1, x_tam, xts, yadc1, xx_tam);
-    interp_linear(wnd_ts, wnd_pir, x_tam, xts, ypir, xx_tam);
-    interp_linear(wnd_ts, wnd_drv, x_tam, xts, ydrv, xx_tam);
+	// Interpolate
+	int yadc1_size = 0, ypir_size = 0, ydrv_size = 0;
+	interp_linear(wnd_ts, wnd_adc1, x_tam, xts, yadc1, xx_tam);
+	interp_linear(wnd_ts, wnd_pir, x_tam, xts, ypir, xx_tam);
+	interp_linear(wnd_ts, wnd_drv, x_tam, xts, ydrv, xx_tam);
 
-    *vmax1 = max_arr(yadc1, xx_tam);
-    *vmin1 = min_arr(yadc1, xx_tam);
-    *vmean1 = *vmax1 - *vmin1;
-    *vstd1 = std_dev(yadc1, xx_tam);
+	*vmax1 = max_arr(yadc1, xx_tam);
+	*vmin1 = min_arr(yadc1, xx_tam);
+	*vmean1 = *vmax1 - *vmin1;// mean_arr(yadc1, xx_tam);
+	*vstd1 = std_dev(yadc1, xx_tam);
+	*hpu1 = 0;
+	*hpd1 = 0;
 
-    *hpu1 = 0;
-    *hpd1 = 0;
+	int flagup = 0;
+	int flagdn = 0;
+	float subwu[OBS_DUR], subwd[OBS_DUR];
+	int subwu_len = 0, subwd_len = 0, uptrend_count = 0, dntrend_count = 0;
+	float submin = 0, submax = 0;
 
-    int flagup = (ydrv[0] >= 1) ? 1 : 0;
-    int flagdn = (ydrv[0] < 1) ? 1 : 0;
-    int flipup = 0, flipdn = 0;
-    float *subwu = (float *)malloc(xx_tam * sizeof(float));
-    float *subwd = (float *)malloc(xx_tam * sizeof(float));
-    int subwu_len = 0, subwd_len = 0;
+	for (int i = 0; i < xx_tam - 1; i++) {
+		if (yadc1[i + 1] < yadc1[i]) {
+			if (uptrend_count >= 2) {
+				flagup = 1;
+				flagdn = 0;
+				uptrend_count = 0;
+			}
+			else {
+				dntrend_count++;
+				uptrend_count = 0;
+				subwu_len = 0;
+				subwd[subwd_len++] = yadc1[i];
+			}
+		}
 
-    for (int i = 0; i < xx_tam - 1; i++) {
-        if (flagup) {
-            subwu[subwu_len++] = yadc1[i];
-        }
-        if (flagdn) {
-            subwd[subwd_len++] = yadc1[i];
-        }
+		if (yadc1[i + 1] > yadc1[i]) {
+			if (dntrend_count >= 2) {
+				flagdn = 1;
+				flagup = 0;
+				dntrend_count = 0;
+			}
+			else {
+				uptrend_count++;
+				dntrend_count = 0;
+				subwd_len = 0;
+				subwu[subwu_len++] = yadc1[i];
+			}
+		}
 
-        if (ydrv[i] < 1 && ydrv[i + 1] >= 1) {
-            flipup = 1;
-            flagup = 1;
-            flagdn = 0;
-            flipdn = 0;
-        } else if (ydrv[i] > 0 && ydrv[i + 1] <= 0) {
-            flipdn = 1;
-            flagdn = 1;
-            flagup = 0;
-            flipup = 0;
-        }
+		if (flagup == 1) {
+			if (subwu_len > 1) {
+				float subwu_min = min_arr(subwu, subwu_len);
+				float subwu_max = max_arr(subwu, subwu_len);
+				float subwu_norm[OBS_DUR];
+				normalize_arr(subwu, subwu_len, subwu_min, subwu_max, subwu_norm);
+				submax = max_arr(subwu_norm, subwu_len);
+				submin = min_arr(subwu_norm, subwu_len);
 
-        if (flipdn) {
-            if (subwu_len > 1) {
-                float subwu_min = min_arr(subwu, subwu_len);
-                float subwu_max = max_arr(subwu, subwu_len);
-                float *subwu_norm = (float *)malloc(subwu_len * sizeof(float));
-                normalize_arr(subwu, subwu_len, subwu_min, subwu_max, subwu_norm);
-                float submax = max_arr(subwu_norm, subwu_len);
-                float submin = min_arr(subwu_norm, subwu_len);
-                float diff = submax - subwu_norm[0];
-                *hpu1 = (*hpu1 + diff) / 2.0;
-                free(subwu_norm);
-            }
-            subwu_len = 0;
-            flipdn = 0;
-            flagup = 0;
-        }
+				float diff = submax - subwu_norm[0];
+				*hpu1 = (*hpu1 + diff) / 2.0;
+			}
+			subwu_len = 0;
+			flagup = 0;
+		}
 
-        if (flipup) {
-            if (subwd_len > 1) {
-                float subwd_min = min_arr(subwd, subwd_len);
-                float subwd_max = max_arr(subwd, subwd_len);
-                float *subwd_norm = (float *)malloc(subwd_len * sizeof(float));
-                normalize_arr(subwd, subwd_len, subwd_min, subwd_max, subwd_norm);
-                float submin = min_arr(subwd_norm, subwd_len);
-                float submax = max_arr(subwd_norm, subwd_len);
-                int idxmin = 0, idxmax = 0;
-                for (int ii = 0; ii < subwd_len; ii++) {
-                    if (subwd_norm[ii] <= 0.7 * submin) {
-                        idxmin = ii;
-                    }
-                    if (subwd_norm[ii] >= 0.7 * submax) {
-                        idxmax = ii;
-                    }
-                }
-                *hpd1 = fminf(idxmin, idxmax);
-                free(subwd_norm);
-            }
-            subwd_len = 0;
-            flipup = 0;
-            flagdn = 0;
-        }
-    }
+		if (flagdn == 1) {
+			if (subwd_len > 1) {
+				float subwd_min = min_arr(subwd, subwd_len);
+				float subwd_max = max_arr(subwd, subwd_len);
+				float subwd_norm[OBS_DUR];
+				normalize_arr(subwd, subwd_len, subwd_min, subwd_max, subwd_norm);
+				submax = max_arr(subwd_norm, subwd_len);
+				submin = min_arr(subwd_norm, subwd_len);
 
-    free(xts);
-    free(yadc1);
-    free(ypir);
-    free(ydrv);
-    free(subwu);
-    free(subwd);
+				float diff = subwd_norm[0] - submin;
+				*hpd1 = (*hpd1 + diff) / 2.0;
+			}
+			subwd_len = 0;
+			flagdn = 0;
+		}
+	}
 }
-///////////////
-void window_finder(int drv, int drv_p, int *up_flag, int *down_flag, int *ctr, int *trig2, int *dur){
-    if (drv - drv_p >= 0.5) {
-        if (*up_flag == 0) {
-            *up_flag = 1;
-        }
-        if (*up_flag == 1) {
-            *ctr++;
-        }
-    } else {
-        *down_flag = 1;
-        if (*down_flag == 1) {
-            if (*ctr >= OBS_DUR_SH) {
-                *trig2 = 1;
-                *dur = OBS_DUR_SH;
-                *ctr = 0;
-                *up_flag = 0;
-            }
-        }
-    }
+
+void window_finder(int drv, int drv_p, int *up_flag, int *down_flag, int *ctr, int *trig2, int *dur) {
+	if (drv - drv_p >= 0.5) {
+		if (*up_flag == 0) {
+			*up_flag = 1;
+		}
+		if (*up_flag == 1) {
+			(*ctr)++;
+		}
+	}
+	else {
+		*down_flag = 1;
+	}
+
+	if (*down_flag == 1) {
+		if (*ctr >= OBS_DUR_SH) {
+			*trig2 = 1;
+			*dur = OBS_DUR_SH;
+			*ctr = 0;
+			*up_flag = 0;
+		}
+	}
 }
-void observation_processor_rt(float ts_c, int drv_c, float adc1_c, int pir_c, float *buf_ts, int *buf_ts_size, int *buf_drv, int *buf_drv_size, float *buf_adc1, int *buf_adc1_size, int *buf_pir, int *buf_pir_size, int *up, int *down, int *ctr, int *shutter_o, float *obs_rt, int *obs_pr){
-    *obs_pr = 0;
+void observation_processor_calib(time_t ts_c, int drv_c, float adc1_c, int pir_c, time_t *buf_ts, int *buf_ts_size, int *buf_drv, int *buf_drv_size, float *buf_adc1, int *buf_adc1_size, int *buf_pir, int *buf_pir_size, int *up, int *down, int *ctr, int *shutter_o, float *obs_rt, int *obs_pr, int label) {
+	*obs_pr = 0;
+	int trig = 0;
+	int dur = -1;
+	printf("observation_processor_calib buf_ts_size %d\n", *buf_ts_size);
+	printf("observation_processor_calib drv_c: %d, drv_p: %d\n", drv_c, buf_drv[(*buf_drv_size)]);
+
+	if (*buf_ts_size > 0) {
+		window_finder(drv_c, buf_drv[(*buf_drv_size)], up, down, ctr, &trig, &dur);
+	}
+	printf("observation_processor_calib after up: %d, down: %d, ctr: %d, trig: %d, dur: %d\n", *up, *down, *ctr, trig, dur);
+
+	if (drv_c > 0) {
+		*shutter_o = 1;
+	}
+
+	if (*shutter_o == 1) {
+		buf_ts[*buf_ts_size] = ts_c;
+		(*buf_ts_size)++;
+
+		buf_adc1[*buf_adc1_size] = adc1_c;
+		(*buf_adc1_size)++;
+
+		buf_pir[*buf_pir_size] = pir_c;
+		(*buf_pir_size)++;
+
+		buf_drv[*buf_drv_size] = drv_c;
+		(*buf_drv_size)++;
+	}
+
+	if (trig == 1) {
+		trig = 0;
+		*shutter_o = 0;
+		int ST = 0;
+		time_t wnd_ts[OBS_DUR];
+		float wnd_adc1[OBS_DUR];
+		float wnd_pir[OBS_DUR];
+		float wnd_drv[OBS_DUR];
+
+		for (int i = ST; i < *buf_ts_size; i++) {
+			wnd_ts[i - ST] = buf_ts[i];
+		}
+		for (int i = ST; i < *buf_adc1_size; i++) {
+			wnd_adc1[i - ST] = buf_adc1[i];
+		}
+		for (int i = ST; i < *buf_pir_size; i++) {
+			wnd_pir[i - ST] = buf_pir[i];
+		}
+		for (int i = ST; i < *buf_drv_size; i++) {
+			wnd_drv[i - ST] = buf_drv[i];
+		}
+
+		for (int i = 0; i < *buf_adc1_size; i++) {
+			printf("wnd_ts[i] %ld, wnd_drv[i] %f,wnd_adc1[i] %f, wnd_pir[i] %f\n", wnd_ts[i], wnd_drv[i], wnd_adc1[i], wnd_pir[i]);
+		}
+		float vmax1, vmin1, vmean1, vstd1, hpu1, hpd1;
+		get_nrfeat_window(*buf_ts_size - ST, wnd_ts, wnd_adc1, wnd_pir, wnd_drv, &vmax1, &vmin1, &vmean1, &vstd1, &hpu1, &hpd1);
+
+		char filename[100];
+		sprintf(filename, "%s_%s.txt", SAVE_FILE, (label == 1) ? "occ" : "uocc");
+		printf("saving feature in file: %s\n", filename);
+		FILE *file = fopen(filename, "a");
+		if (file != NULL) {
+			fprintf(file, "%ld,%f,%f,%f,%f,%f,%f\n", wnd_ts[*buf_ts_size - ST - 1], vmax1, vmin1, vmean1, vstd1, hpu1, hpd1);
+			fclose(file);
+		}
+		else
+		{
+			printf("saving feature file failed at %s", filename);
+		}
+
+		*buf_ts_size = 0;
+		*buf_adc1_size = 0;
+		*buf_pir_size = 0;
+		*buf_drv_size = 0;
+	}
+}
+void observation_processor_rt(time_t ts_c, int drv_c, float adc1_c, int pir_c, time_t *buf_ts, int *buf_ts_size, int *buf_drv, int *buf_drv_size, float *buf_adc1, int *buf_adc1_size, int *buf_pir, int *buf_pir_size, int *up, int *down, int *ctr, int *shutter_o, float *obs_rt, int *obs_pr) {
+	*obs_pr = 0;
 	int trig2 = 0;
-    int dur = -1;
-		
-    if (*buf_ts_size > 0) {
-        window_finder(drv_c, buf_drv[*buf_drv_size - 1], up, down, ctr, &trig2, &dur);
-    }
+	int dur = -1;
+	printf("observation_processor_rt buf_ts_size %d\n", *buf_ts_size);
+	printf("observation_processor_rt drv_c: %d, drv_p: %d\n", drv_c, buf_drv[(*buf_drv_size)]);
 
-    if (drv_c > 0) {
-        *shutter_o = 1;
-    }
+	if (*buf_ts_size > 0) {
+		window_finder(drv_c, buf_drv[(*buf_drv_size)], up, down, ctr, &trig2, &dur);
+	}
+	printf("observation_processor_rt after up: %d, down: %d, ctr: %d, trig2: %d, dur: %d\n", *up, *down, *ctr, trig2, dur);
 
-    if (*shutter_o == 1) {
-        buf_ts[*buf_ts_size] = ts_c;
-        (*buf_ts_size)++;
+	if (drv_c > 0) {
+		*shutter_o = 1;
+	}
 
-        buf_adc1[*buf_adc1_size] = adc1_c;
-        (*buf_adc1_size)++;
+	if (*shutter_o == 1) {
+		buf_ts[*buf_ts_size] = ts_c;
+		(*buf_ts_size)++;
 
-        buf_pir[*buf_pir_size] = pir_c;
-        (*buf_pir_size)++;
+		buf_adc1[*buf_adc1_size] = adc1_c;
+		(*buf_adc1_size)++;
 
-        buf_drv[*buf_drv_size] = drv_c;
-        (*buf_drv_size)++;
-    }
+		buf_pir[*buf_pir_size] = pir_c;
+		(*buf_pir_size)++;
 
-    if (trig2 == 1) {
-        trig2 = 0;
-        *shutter_o = 0;
-        int ST = 0;
-        float wnd_ts[OBS_DUR];
-        float wnd_adc1[OBS_DUR];
-        float wnd_pir[OBS_DUR];
-        float wnd_drv[OBS_DUR];
+		buf_drv[*buf_drv_size] = drv_c;
+		(*buf_drv_size)++;
+	}
 
-        for (int i = ST; i < *buf_ts_size; i++) {
-            wnd_ts[i - ST] = buf_ts[i];
-        }
-        for (int i = ST; i < *buf_adc1_size; i++) {
-            wnd_adc1[i - ST] = buf_adc1[i];
-        }
-        for (int i = ST; i < *buf_pir_size; i++) {
-            wnd_pir[i - ST] = buf_pir[i];
-        }
-        for (int i = ST; i < *buf_drv_size; i++) {
-            wnd_drv[i - ST] = buf_drv[i];
-        }
+	if (trig2 == 1) {
+		trig2 = 0;
+		*shutter_o = 0;
+		int ST = 0;
+		time_t wnd_ts[OBS_DUR];
+		float wnd_adc1[OBS_DUR];
+		float wnd_pir[OBS_DUR];
+		float wnd_drv[OBS_DUR];
 
-        float vmax1, vmin1, vmean1, vstd1, hpu1, hpd1;
-        get_nrfeat_window(*buf_ts_size - ST, wnd_ts, wnd_adc1, wnd_pir, wnd_drv, &vmax1, &vmin1, &vmean1, &vstd1, &hpu1, &hpd1);
+		for (int i = ST; i < *buf_ts_size; i++) {
+			wnd_ts[i - ST] = buf_ts[i];
+		}
+		for (int i = ST; i < *buf_adc1_size; i++) {
+			wnd_adc1[i - ST] = buf_adc1[i];
+		}
+		for (int i = ST; i < *buf_pir_size; i++) {
+			wnd_pir[i - ST] = buf_pir[i];
+		}
+		for (int i = ST; i < *buf_drv_size; i++) {
+			wnd_drv[i - ST] = buf_drv[i];
+		}
 
-        *buf_ts_size = 0;
-        *buf_adc1_size = 0;
-        *buf_pir_size = 0;
-        *buf_drv_size = 0;
-		
-		if (FEATS == 12456) {
-            obs_rt[0] = vmax1;
-            obs_rt[1] = vmin1;
-            obs_rt[2] = vstd1;
-            obs_rt[3] = hpu1;
-            obs_rt[4] = hpd1;
-			*obs_pr = 5;
-        } else if (FEATS == 2456) {
-            obs_rt[0] = vmin1;
-            obs_rt[1] = vstd1;
-            obs_rt[2] = hpu1;
-            obs_rt[3] = hpd1;
-			*obs_pr = 4;
-        } else if (FEATS == 1245) {
-            obs_rt[0] = vmax1;
-            obs_rt[1] = vmin1;
-            obs_rt[2] = vstd1;
-            obs_rt[3] = hpu1;
-			*obs_pr = 4;
-        } else if (FEATS == 124) {
-            obs_rt[0] = vmax1;
-            obs_rt[1] = vmin1;
-            obs_rt[2] = vstd1;
-			*obs_pr = 3;
-        } else if (FEATS == 145) {
-            obs_rt[0] = vmax1;
-            obs_rt[1] = vstd1;
-            obs_rt[2] = hpu1;
-			*obs_pr = 3;
-        } else if (FEATS == 146) {
-            obs_rt[0] = vmax1;
-            obs_rt[1] = vstd1;
-            obs_rt[2] = hpd1;
-			*obs_pr = 3;
-        } else if (FEATS == 235) {
-            obs_rt[0] = vmin1;
-            obs_rt[1] = vmean1;
-            obs_rt[2] = hpu1;
-			*obs_pr = 3;
-        } else if (FEATS == 245) {
-            obs_rt[0] = vmin1;
-            obs_rt[1] = vstd1;
-            obs_rt[2] = hpu1;
-			*obs_pr = 3;
-        } else if (FEATS == 345) {
-            obs_rt[0] = vmean1;
-            obs_rt[1] = vstd1;
-            obs_rt[2] = hpu1;
-			*obs_pr = 3;
-        } else if (FEATS == 346) {
-            obs_rt[0] = vmean1;
-            obs_rt[1] = vstd1;
-            obs_rt[2] = hpd1;
-			*obs_pr = 3;
-        }
-    }
+		float vmax1, vmin1, vmean1, vstd1, hpu1, hpd1;
+		get_nrfeat_window(*buf_ts_size - ST, wnd_ts, wnd_adc1, wnd_pir, wnd_drv, &vmax1, &vmin1, &vmean1, &vstd1, &hpu1, &hpd1);
+
+		*buf_ts_size = 0;
+		*buf_adc1_size = 0;
+		*buf_pir_size = 0;
+		*buf_drv_size = 0;
+
+		obs_rt[0] = vmax1;
+		obs_rt[1] = vmin1;
+		obs_rt[2] = vmean1;
+		obs_rt[3] = vstd1;
+		obs_rt[4] = hpu1;
+		obs_rt[5] = hpd1;
+		*obs_pr = 6;
+	}
 }
 
 float cosine_distance(float *p1, float *p2, int n) {
-    float dot_product = 0.0;
-    float norm_p1 = 0.0;
-    float norm_p2 = 0.0;
+	float dot_product = 0.0;
+	float norm_p1 = 0.0;
+	float norm_p2 = 0.0;
 
-    for (int i = 0; i < n; i++) {
-        dot_product += p1[i] * p2[i];
-        norm_p1 += p1[i] * p1[i];
-        norm_p2 += p2[i] * p2[i];
-    }
+	for (int i = 0; i < n; i++) {
+		if (feats[i] > 0) {
+			dot_product += p1[i] * p2[i];
+			norm_p1 += p1[i] * p1[i];
+			norm_p2 += p2[i] * p2[i];
+		}
+	}
 
-    norm_p1 = sqrt(norm_p1);
-    norm_p2 = sqrt(norm_p2);
+	norm_p1 = sqrt(norm_p1);
+	norm_p2 = sqrt(norm_p2);
 
-    if (norm_p1 == 0.0 || norm_p2 == 0.0) {
-        return 1.0; // Cosine distance is 1.0 when one of the vectors is the zero vector
-    }
+	if (norm_p1 == 0.0 || norm_p2 == 0.0) {
+		return 1.0; // Cosine distance is 1.0 when one of the vectors is the zero vector
+	}
 
-    return 1.0 - (dot_product / (norm_p1 * norm_p2));
+	return 1.0 - (dot_product / (norm_p1 * norm_p2));
 }
 
 float euclidean_distance(float *p1, float *p2, int n) {
-    float sum_squares = 0.0;
+	float sum_squares = 0.0;
 
-    for (int i = 0; i < n; i++) {
-        sum_squares += (p1[i] - p2[i]) * (p1[i] - p2[i]);
-    }
+	for (int i = 0; i < n; i++) {
+		if (feats[i] > 0) {
+			sum_squares += (p1[i] - p2[i]) * (p1[i] - p2[i]);
+		}
+	}
 
-    return sqrt(sum_squares);
+	return sqrt(sum_squares);
 }
 
-int classify_knn(float **training_data, float *unknown, int k, int num_features, int num_training_samples, char **labels, char *dist_type) {
-    float *distances = (float *)malloc(num_training_samples * sizeof(float));
-    int *indices = (int *)malloc(k * sizeof(int));
-    int *votes = (int *)calloc(2, sizeof(int)); // Assuming binary classification (0 or 1)
+int classify_knn(DataPoint *dataset, float *unknown, int k, int num_features, int num_training_samples, char *dist_type) {
+	float distances[MAX_DATASET_SIZE];
+	int indices[MAX_DATASET_SIZE];
+	int votes[2] = { 0 }; // Assuming binary classification (0 or 1)
+	int euc = 0;
 
-    // Calculate distances between unknown sample and training samples
-    for (int i = 0; i < num_training_samples; i++) {
-        if (strcmp(dist_type, "EUC") == 0) {
-            distances[i] = euclidean_distance(training_data[i], unknown, num_features);
-        } else {
-            distances[i] = cosine_distance(training_data[i], unknown, num_features);
-        }
-    }
+	if (strcmp(dist_type, "EUC") == 0)
+		euc = 1;
+	// Calculate distances between unknown sample and training samples
+	for (int i = 0; i < num_training_samples; i++) {
+		if (euc == 1) {
+			distances[i] = euclidean_distance(dataset[i].obs, unknown, num_features);
+		}
+		else {
+			distances[i] = cosine_distance(dataset[i].obs, unknown, num_features);
+		}
+	}
 
-    // Sort the distances and get the indices of the k nearest neighbors
-    for (int i = 0; i < k; i++) {
-        int min_idx = i;
-        float min_dist = distances[i];
-        for (int j = i + 1; j < num_training_samples; j++) {
-            if (distances[j] < min_dist) {
-                min_idx = j;
-                min_dist = distances[j];
-            }
-        }
-        indices[i] = min_idx;
-        distances[min_idx] = distances[i];
-        distances[i] = min_dist;
-    }
+	printf("num_training_samples %d\n", num_training_samples);
+	for (int i = 0; i < num_features; i++) {
+		printf("unknown[i] %f\n", unknown[i]);
+	}
+	// Sort the distances and get the indices of the k nearest neighbors
+	for (int i = 0; i < k; i++) {
+		int min_idx = i;
+		float min_dist = distances[i];
+		for (int j = i + 1; j < num_training_samples; j++) {
+			if (distances[j] < min_dist) {
+				min_idx = j;
+				min_dist = distances[j];
+			}
+		}
+		indices[i] = min_idx;
+		distances[min_idx] = distances[i];
+		distances[i] = min_dist;
+	}
 
-    // Count the votes for the k nearest neighbors
-    for (int i = 0; i < k; i++) {
-        votes[atoi(labels[indices[i]])]++;
-    }
+	// Count the votes for the k nearest neighbors
+	for (int i = 0; i < k; i++) {
+		votes[dataset[indices[i]].label]++;
+	}
 
-    // Determine the most common label
-    int max_votes = 0;
-    int predicted_label = -1;
-    for (int i = 0; i < 2; i++) {
-        if (votes[i] > max_votes) {
-            max_votes = votes[i];
-            predicted_label = i;
-        }
-    }
+	// Determine the most common label
+	int max_votes = 0;
+	int predicted_label = -1;
+	for (int i = 0; i < 2; i++) {
+		if (votes[i] > max_votes) {
+			max_votes = votes[i];
+			predicted_label = i;
+		}
+	}
 
-    free(distances);
-    free(indices);
-    free(votes);
-    return predicted_label;
+	printf("predicted_label %d\n", predicted_label);
+	return predicted_label;
 }
-int main() {
-    float pair_data[OBS_DUR] = {0};
-    int drv_c, head1 = 0, head2 = 0, head3 = 0;
-    float drv[OBS_DUR] = {0}, pir[OBS_DUR] = {0};
-    float adc1_r[OBS_DUR] = {0};
-    time_t ts[OBS_DUR] = {0};
-    int pair_size=0, drv_size = 0, pir_size = 0, adc1_r_size = 0, ts_size = 0;
-    time_t ts_st = 0, ts_end = 0;
-    int obs = 0;
-    int detectR = 0; //0="Unoccupied(PIR)", 1="Occupied(PIR)"
-    time_t last_sec = 1609459200;
 
-    //HANDLE fd = init_serial_win();
-    int fd = init_serial_unix();
-    while (obs < 1) {
-        unsigned char byte;
-        //ReadFile(fd, &byte, 1, NULL, NULL);
-        read(fd, &byte, 1);
-        int data = (int)byte;  // convert to integer
-        head1 = head2;
-        head2 = head3;
-        head3 = data;
-        
-		if (round(ts_end - ts_st) != last_sec) {
-            printf("%ld ", round(ts_end - ts_st));
-        }
-        last_sec = round(ts_end - ts_st);
-		
-		int slpr_op=0;
-        if ((ts_end - ts_st) >= OBS_DUR) {
-            obs++;
-            for (int i = 5; i < ts_size; i++) {
-                adc1_r[i - 5] = adc1_r[i];
-                drv[i - 5] = drv[i];
-                pir[i - 5] = pir[i];
-                ts[i - 5] = ts[i];
-            }
+void get_obs_rt2(float *data, int row, int num_features, float *obs) {
+	for (int i = 0; i < num_features; i++) {
+		obs[i] = data[row * num_features + i];
+	}
+}
 
-            for (int i = 0; i < adc1_r_size; i++) {
-                adc1_r[i]=adc1_r[i]/50.0;
-            }
+int learn_infer(float *obsi, int num_features) {
+	int K = 3;
+	char dist[4] = "EUC";
 
-            // Detection algorithm
-            int act_pir = 0;
-            for (int i = 0; i < pir_size; i++) {
-                act_pir = act_pir+pir[i];
-            }
+	float so[MAX_DATASET_SIZE][MAX_FEATURES];
+	float uo[MAX_DATASET_SIZE][MAX_FEATURES];
+	int predicted_label = -1;
 
-            if (act_pir > PIR_SENST * pir_size) {
-                detectR = 1;
-                for (int i = 0; i < pir_size; i++) {
-                    pir[i] = 1;
-                }
-            } else {
-                for (int i = 0; i < pir_size; i++) {
-                    pir[i] = 0;
-                }
-            }
+	FILE *occ_file = fopen("2024-02-28-21-20_occ.txt", "r");
+	FILE *uocc_file = fopen("2024-02-28-21-20_uocc.txt", "r");
 
-            consolidate(ts, &ts_size, adc1_r, &adc1_r_size, pir, &pir_size, drv, &drv_size);
-			
-			if (detectR != 1) {
+	if (occ_file == NULL || uocc_file == NULL) {
+		printf("Invalid calibration profile. Please calibrate or choose profile\n");
+		return predicted_label;
+	}
+
+	float occ_data[MAX_DATASET_SIZE * MAX_FEATURES];
+	float uocc_data[MAX_DATASET_SIZE * MAX_FEATURES];
+	int occ_rows = 0, uocc_rows = 0;
+
+	char line[100];
+	char *token;
+
+	while (fgets(line, sizeof(line), occ_file)) {
+		token = strtok(line, ",");
+		int i = 0;
+		while (token != NULL && i < num_features) {
+			occ_data[occ_rows * num_features + i] = atof(token);
+			token = strtok(NULL, ",");
+			i++;
+		}
+		occ_rows++;
+	}
+
+	while (fgets(line, sizeof(line), uocc_file)) {
+		token = strtok(line, ",");
+		int i = 0;
+		while (token != NULL && i < num_features) {
+			uocc_data[uocc_rows * num_features + i] = atof(token);
+			token = strtok(NULL, ",");
+			i++;
+		}
+		uocc_rows++;
+	}
+
+	fclose(occ_file);
+	fclose(uocc_file);
+
+	dataset_size = 0; // Reset dataset_size before populating dataset
+
+	for (int i = 0; i < occ_rows; i++) {
+		float obs[MAX_FEATURES];
+		get_obs_rt2(occ_data, i, num_features, obs);
+		for (int j = 0; j < num_features; j++) {
+			dataset[dataset_size].obs[j] = obs[j + 1];
+		}
+		dataset[dataset_size].label = 1;
+		dataset_size++;
+		memcpy(so[i], obs, num_features * sizeof(float));
+	}
+
+	for (int i = 0; i < uocc_rows; i++) {
+		float obs[MAX_FEATURES];
+		get_obs_rt2(uocc_data, i, num_features, obs);
+		for (int j = 0; j < num_features; j++) {
+			dataset[dataset_size].obs[j] = obs[j + 1];
+		}
+		dataset[dataset_size].label = 0;
+		dataset_size++;
+		memcpy(uo[i], obs, num_features * sizeof(float));
+	}
+
+	// KNN Classification
+	predicted_label = classify_knn(dataset, obsi, K, num_features, dataset_size, dist);
+
+	return predicted_label;
+}
+
+void waitFor(unsigned int secs) {
+	unsigned int retTime = time(0) + secs;   // Get finishing time.
+	while (time(0) < retTime);               // Loop until it arrives.
+}
+int obs_loop() {
+	float pair_data[7] = { 0 };
+	int drv_c, head1 = 0, head2 = 0, head3 = 0;
+	float drv[OBS_DUR] = { 0 }, pir[OBS_DUR] = { 0 }, adc1_r[OBS_DUR] = { 0 };
+	time_t ts[OBS_DUR] = { 0 };
+	int pair_size = 0, drv_size = 0, pir_size = 0, adc1_r_size = 0, ts_size = 0;
+	time_t ts_st = 0, ts_end = 0;
+	int obs = 0;
+	int detectR = 0; //0="Unoccupied(PIR)", 1="Occupied(PIR)"
+	time_t last_sec = 1609459200;
+
+	FILE *file = fopen("data.txt", "r"); // Open the file for reading
+	if (file == NULL) {
+		printf("Error opening file.\n");
+		return 1;
+	}
+
+	int data;
+	unsigned char byte;
+	while ((byte = fgetc(file)) != EOF) {
+		data = byte - 48;
+		head1 = head2;
+		head2 = data;
+
+		if (data == 10) //If A is read
+			break;
+
+		if ((ts_end - ts_st) != last_sec) {
+			printf("Diff: %ld\n", (ts_end - ts_st));
+		}
+		last_sec = ts_end - ts_st;
+
+		int slpr_op = 0;
+		if ((last_sec >= OBS_DUR) && (ts_size > IGNORE1ST + 5)) {
+			obs++;
+			for (int i = IGNORE1ST; i < ts_size; i++) {
+				adc1_r[i - IGNORE1ST] = adc1_r[i];
+				drv[i - IGNORE1ST] = drv[i];
+				pir[i - IGNORE1ST] = pir[i];
+				ts[i - IGNORE1ST] = ts[i];
+			}
+
+			ts_size = ts_size - IGNORE1ST;
+			adc1_r_size = adc1_r_size - IGNORE1ST;
+			pir_size = pir_size - IGNORE1ST;
+			drv_size = drv_size - IGNORE1ST;
+
+			for (int i = 0; i < adc1_r_size; i++) {
+				adc1_r[i] = adc1_r[i] / 50.0;
+			}
+
+			// Detection algorithm
+			int act_pir = 0;
+			for (int i = 0; i < pir_size; i++) {
+				act_pir = act_pir + pir[i];
+			}
+
+			if (act_pir > PIR_SENST * pir_size) {
+				detectR = 1;
+				for (int i = 0; i < pir_size; i++) {
+					pir[i] = 1;
+				}
+			}
+			else {
+				for (int i = 0; i < pir_size; i++) {
+					pir[i] = 0;
+				}
+			}
+			printf("ts_size: %d, adc1_r_size: %d, pir_size: %d, drv_size: %d\n", ts_size, adc1_r_size, pir_size, drv_size);
+			for (int i = 0; i < ts_size; i++) {
+				printf("ts[i] %ld, drv[i] %f,adc1_r[i] %f, pir[i] %f\n", ts[i], drv[i], adc1_r[i], pir[i]);
+			}
+			consolidate(ts, &ts_size, adc1_r, &adc1_r_size, pir, &pir_size, drv, &drv_size);
+			printf("after_ts_size: %d, adc1_r_size: %d, pir_size: %d, drv_size: %d\n", ts_size, adc1_r_size, pir_size, drv_size);
+			for (int i = 0; i < ts_size; i++) {
+				printf("ts[i] %ld, drv[i] %f,adc1_r[i] %f, pir[i] %f\n", ts[i], drv[i], adc1_r[i], pir[i]);
+			}
+			if (detectR == 0) {
 				int up = 1, down = 1, ctr = 0, shutter_o = 0;
-				float buf_ts[OBS_DUR] = {0};
-				float buf_adc1[OBS_DUR] = {0};
-				int buf_pir[OBS_DUR] = {0};
-				int buf_drv[OBS_DUR] = {0};
+				time_t buf_ts[OBS_DUR] = { 0 };
+				float buf_adc1[OBS_DUR] = { 0 };
+				int buf_pir[OBS_DUR] = { 0 };
+				int buf_drv[OBS_DUR] = { 0 };
 				int buf_ts_size = 0, buf_adc1_size = 0, buf_pir_size = 0, buf_drv_size = 0;
-				int obs_pr=0;
+				int obs_pr = 0;
+
 				for (int i = 0; i < drv_size; i++) {
-					float obs_rt[5] = {0};
+					float obs_rt[MAX_FEATURES] = { 0 };
 					observation_processor_rt(ts[i], drv[i], adc1_r[i], pir[i], buf_ts, &buf_ts_size, buf_drv, &buf_drv_size, buf_adc1, &buf_adc1_size, buf_pir, &buf_pir_size, &up, &down, &ctr, &shutter_o, obs_rt, &obs_pr);
-					
+					printf("obs_pr: %d\n", obs_pr);
 					if (obs_pr > 0)
 					{
-						//slpr_op=learn_infer(obs_rt,obs_pr);
-						slpr_op=1;
-						break; //TBD
+						slpr_op = learn_infer(obs_rt, MAX_FEATURES + 1);
+						printf("SLEEPIR Output: %d\n", slpr_op);
+						break;
 					}
-					
+
 				}
 			}
 
+			if (detectR == 1) {
+				printf("MOTION-HIGH\n");
+			}
+			else {
+				printf("MOTION-LOW\n");
+			}
 
-        }
-		
-        if (detectR == 1) {
-            printf("IO_pinPIR,GPIO.HIGH\n");
-        } else {
-            printf("IO_pinPIR,GPIO.LOW\n");
-        }
-		
-		if (slpr_op == 1) {
-            printf("IO_pinPIR,GPIO.HIGH\n");
-        } else {
-            printf("IO_pinPIR,GPIO.LOW\n");
-        }
-		
-		// Reset variables
-        drv_size = 0;
-        pir_size = 0;
-        adc1_r_size = 0;
-        ts_size = 0;
-        ts_st = 0;
-        ts_end = 0;
-		head1 = 0;
-        head2 = 0;
-        head3 = 0;
-		slpr_op = 0;
-		detectR = 0;
+			if (slpr_op == 1) {
+				printf("STATIONARY-HIGH\n");
+			}
+			else {
+				printf("STATIONARY-LOW\n");
+			}
+
+			// Reset variables
+			drv_size = 0;
+			pir_size = 0;
+			adc1_r_size = 0;
+			ts_size = 0;
+			ts_st = 0;
+			ts_end = 0;
+			head1 = 0;
+			head2 = 0;
+			head3 = 0;
+			slpr_op = 0;
+			detectR = 0;
+
+		}
 		////////////////////////////////////////////////
-        if (head2 == 13 && head3 == 10) { //carriage return followed by line feed
-            // Get the current time
-            time_t dt_c;
-            time(&dt_c);
-            // Convert to local time
-            struct tm *t_c = localtime(&dt_c);
+		if (head1 == -38) {
+			// Get the current time
+			time_t dt_c;
+			time(&dt_c);
+			// Convert to local time
+			struct tm *t_c = localtime(&dt_c);
 
-            // Format the datetime as a string
-            char formatted_time[20];
-            strftime(formatted_time, sizeof(formatted_time), "%Y-%m-%d %H:%M:%S", t_c);
-            printf("Formatted local time: %s\n", formatted_time);
+			// Convert local time to UTC
+			struct tm *ts_gm = gmtime(&dt_c);
+			// Get the Unix timestamp from the UTC time
+			time_t ts_c = mktime(ts_gm);
+			printf("UTC timestamp: %ld\n", ts_c);
 
-            // Convert local time to UTC
-            struct tm *ts_gm = gmtime(&dt_c);
-            // Get the Unix timestamp from the UTC time
-            time_t ts_c = mktime(ts_gm);
-            printf("UTC timestamp: %ld\n", ts_c);
+			if (ts_st == 0) {
+				ts_st = ts_c;
+			}
+			ts_end = ts_c;
 
-            if (ts_st == 0) {
-                ts_st = ts_c;
-            }
-            ts_end = ts_c;
+			if (ts_size < OBS_DUR) {
+				ts[ts_size++] = ts_c;
+			}
 
-            ts[ts_size++] = ts_c;
-            if (pair_data[1] > 0) {
-                drv_c = 1;
-            } else {
-                drv_c = 0;
-            }
+			if (pair_data[1 - 1] > 0.0) {
+				drv_c = 1;
+			}
+			else {
+				drv_c = 0;
+			}
 
-            drv[drv_size++] = drv_c;
-            adc1_r[adc1_r_size++] = (pair_data[3] * 256 + pair_data[4]);
-            pir[pir_size++] = pair_data[6];
+			if (drv_size < OBS_DUR) {
+				drv[drv_size++] = drv_c;
+			}
 
-            pair_data[0] = 0;
+			if (adc1_r_size < OBS_DUR) {
+				adc1_r[adc1_r_size++] = (pair_data[3 - 1] * 10 + pair_data[4 - 1]);
+			}
+
+			if (pir_size < OBS_DUR) {
+				pir[pir_size++] = pair_data[6 - 1];
+			}
+
 			pair_size = 0;
-        }
+			waitFor(1);
+		}
+		if (pair_size > 6)
+			pair_size = 0;
+		pair_data[pair_size++] = data;
+	}
 
-        pair_data[pair_size++]=data;
-    }
+	fclose(file);
+	return 0;
+}
+int obs_loop_calib() {
+	int turn = 0;
+	while (turn <= 1) {
+		if (turn > 0) {
+			if (TARGET_CLASS == 0) {
+				printf("Unoccupancy calibrated.Moving to occupancy calibration.\n");
+			}
+			else {
+				printf("Occupancy calibrated.Moving to unoccupancy calibration.\n");
+			}
+		}
+		turn = turn + 1;
+		float pair_data[7] = { 0 };
+		int drv_c, head1 = 0, head2 = 0, head3 = 0;
+		float drv[OBS_DUR] = { 0 }, pir[OBS_DUR] = { 0 }, adc1_r[OBS_DUR] = { 0 };
+		time_t ts[OBS_DUR] = { 0 };
+		int pair_size = 0, drv_size = 0, pir_size = 0, adc1_r_size = 0, ts_size = 0;
+		time_t ts_st = 0, ts_end = 0;
+		int obs = 0;
+		int detectR = 0; //0="Unoccupied(PIR)", 1="Occupied(PIR)"
+		time_t last_sec = 1609459200;
 
-    // Close serial port
-    //CloseHandle(fd);
-    close(fd);
+		FILE *file = fopen("data.txt", "r"); // Open the file for reading
+		if (file == NULL) {
+			printf("Error opening file.\n");
+			return 1;
+		}
 
-    return 0;
+		int data;
+		unsigned char byte;
+		while ((byte = fgetc(file)) != EOF) {
+			data = byte - 48;
+			head1 = head2;
+			head2 = data;
+
+			if (data == 10) //If A is read
+				break;
+
+			if ((ts_end - ts_st) != last_sec) {
+				printf("Diff: %ld\n", (ts_end - ts_st));
+			}
+			last_sec = ts_end - ts_st;
+
+			int slpr_op = 0;
+			if ((last_sec >= OBS_DUR) && (ts_size > IGNORE1ST + 5)) {
+				obs++;
+				for (int i = IGNORE1ST; i < ts_size; i++) {
+					adc1_r[i - IGNORE1ST] = adc1_r[i];
+					drv[i - IGNORE1ST] = drv[i];
+					pir[i - IGNORE1ST] = pir[i];
+					ts[i - IGNORE1ST] = ts[i];
+				}
+
+				ts_size = ts_size - IGNORE1ST;
+				adc1_r_size = adc1_r_size - IGNORE1ST;
+				pir_size = pir_size - IGNORE1ST;
+				drv_size = drv_size - IGNORE1ST;
+
+				for (int i = 0; i < adc1_r_size; i++) {
+					adc1_r[i] = adc1_r[i] / 50.0;
+				}
+
+				// Detection algorithm
+				int act_pir = 0;
+				for (int i = 0; i < pir_size; i++) {
+					act_pir = act_pir + pir[i];
+				}
+
+				if (act_pir > PIR_SENST * pir_size) {
+					detectR = 1;
+					for (int i = 0; i < pir_size; i++) {
+						pir[i] = 1;
+					}
+				}
+				else {
+					for (int i = 0; i < pir_size; i++) {
+						pir[i] = 0;
+					}
+				}
+				printf("ts_size: %d, adc1_r_size: %d, pir_size: %d, drv_size: %d\n", ts_size, adc1_r_size, pir_size, drv_size);
+				for (int i = 0; i < ts_size; i++) {
+					printf("ts[i] %ld, drv[i] %f,adc1_r[i] %f, pir[i] %f\n", ts[i], drv[i], adc1_r[i], pir[i]);
+				}
+				consolidate(ts, &ts_size, adc1_r, &adc1_r_size, pir, &pir_size, drv, &drv_size);
+				printf("after_ts_size: %d, adc1_r_size: %d, pir_size: %d, drv_size: %d\n", ts_size, adc1_r_size, pir_size, drv_size);
+				for (int i = 0; i < ts_size; i++) {
+					printf("ts[i] %ld, drv[i] %f,adc1_r[i] %f, pir[i] %f\n", ts[i], drv[i], adc1_r[i], pir[i]);
+				}
+
+				if (detectR == 0) {
+					int up = 1, down = 1, ctr = 0, shutter_o = 0;
+					time_t buf_ts[OBS_DUR] = { 0 };
+					float buf_adc1[OBS_DUR] = { 0 };
+					int buf_pir[OBS_DUR] = { 0 };
+					int buf_drv[OBS_DUR] = { 0 };
+					int buf_ts_size = 0, buf_adc1_size = 0, buf_pir_size = 0, buf_drv_size = 0;
+					int obs_pr = 0;
+
+					for (int i = 0; i < drv_size; i++) {
+						float obs_rt[MAX_FEATURES] = { 0 };
+						observation_processor_calib(ts[i], drv[i], adc1_r[i], pir[i], buf_ts, &buf_ts_size, buf_drv, &buf_drv_size, buf_adc1, &buf_adc1_size, buf_pir, &buf_pir_size, &up, &down, &ctr, &shutter_o, obs_rt, &obs_pr, TARGET_CLASS);
+					}
+				}
+
+				if (detectR == 1) {
+					printf("MOTION-HIGH\n");
+				}
+				else {
+					printf("MOTION-LOW\n");
+				}
+
+				// Reset variables
+				drv_size = 0;
+				pir_size = 0;
+				adc1_r_size = 0;
+				ts_size = 0;
+				ts_st = 0;
+				ts_end = 0;
+				head1 = 0;
+				head2 = 0;
+				head3 = 0;
+				slpr_op = 0;
+				detectR = 0;
+
+			}
+			////////////////////////////////////////////////
+			if (head1 == -38) {
+				// Get the current time
+				time_t dt_c;
+				time(&dt_c);
+				// Convert to local time
+				struct tm *t_c = localtime(&dt_c);
+
+				// Convert local time to UTC
+				struct tm *ts_gm = gmtime(&dt_c);
+				// Get the Unix timestamp from the UTC time
+				time_t ts_c = mktime(ts_gm);
+				printf("UTC timestamp: %ld\n", ts_c);
+
+				if (ts_st == 0) {
+					ts_st = ts_c;
+				}
+				ts_end = ts_c;
+
+				if (ts_size < OBS_DUR) {
+					ts[ts_size++] = ts_c;
+				}
+
+				if (pair_data[1 - 1] > 0.0) {
+					drv_c = 1;
+				}
+				else {
+					drv_c = 0;
+				}
+
+				if (drv_size < OBS_DUR) {
+					drv[drv_size++] = drv_c;
+				}
+
+				if (adc1_r_size < OBS_DUR) {
+					adc1_r[adc1_r_size++] = (pair_data[3 - 1] * 10 + pair_data[4 - 1]);
+				}
+
+				if (pir_size < OBS_DUR) {
+					pir[pir_size++] = pair_data[6 - 1];
+				}
+
+				pair_size = 0;
+				waitFor(1);
+			}
+			if (pair_size > 6)
+				pair_size = 0;
+			pair_data[pair_size++] = data;
+		}
+		fclose(file);
+	}
+	return 0;
+}
+
+int main()
+{
+	int error = 0;
+	if (TARGET_CLASS == -1)
+		error = obs_loop();
+	else
+		error = obs_loop_calib();
+	return 0;
 }
